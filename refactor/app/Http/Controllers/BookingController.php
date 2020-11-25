@@ -35,7 +35,6 @@ class BookingController extends Controller
      */
     public function index(Request $request)
     {
-        dd($request);
         if($user_id = $request->get('user_id')) {
             $response = $this->repository->getUsersJobs($user_id);
         }
@@ -53,7 +52,8 @@ class BookingController extends Controller
      */
     public function show($id)
     {
-        $job = $this->repository->with('translatorJobRel.user')->find($id);
+        // anything related to database ie finding creating or updating shoyld be in Repo class
+        $job = $this->repository->getTranslatorJobRel();
 
         return response($job);
     }
@@ -66,7 +66,154 @@ class BookingController extends Controller
     {
         $data = $request->all();
 
-        $response = $this->repository->store($request->__authenticatedUser, $data);
+        // almost 90% of this function was doing if else comperison, which should not be in repo 
+        // $response = $this->repository->store($request->__authenticatedUser, $data);
+
+        $immediatetime = 5;
+        $consumer_type = $user->userMeta->consumer_type;
+        if ($user->user_type == env('CUSTOMER_ROLE_ID')) {
+            $cuser = $user;
+
+            // data related to response should be in controller or some helper service, but not in repo class
+            if (!isset($data['from_language_id'])) {
+                $response['status'] = 'fail';
+                $response['message'] = "Du måste fylla in alla fält";
+                $response['field_name'] = "from_language_id";
+                return response($response);
+            }
+
+            if ($data['immediate'] == 'no') {
+                if (isset($data['due_date']) && $data['due_date'] == '') {
+                    $response['status'] = 'fail';
+                    $response['message'] = "Du måste fylla in alla fält";
+                    $response['field_name'] = "due_date";
+                    return response($response);
+                }
+                if (isset($data['due_time']) && $data['due_time'] == '') {
+                    $response['status'] = 'fail';
+                    $response['message'] = "Du måste fylla in alla fält";
+                    $response['field_name'] = "due_time";
+                    return response($response);
+                }
+                if (!isset($data['customer_phone_type']) && !isset($data['customer_physical_type'])) {
+                    $response['status'] = 'fail';
+                    $response['message'] = "Du måste göra ett val här";
+                    $response['field_name'] = "customer_phone_type";
+                    return response($response);
+                }
+                if (isset($data['duration']) && $data['duration'] == '') {
+                    $response['status'] = 'fail';
+                    $response['message'] = "Du måste fylla in alla fält";
+                    $response['field_name'] = "duration";
+                    return response($response);
+                }
+            } else {
+                if (isset($data['duration']) && $data['duration'] == '') {
+                    $response['status'] = 'fail';
+                    $response['message'] = "Du måste fylla in alla fält";
+                    $response['field_name'] = "duration";
+                    return response($response);
+                }
+            }
+            if (isset($data['customer_phone_type'])) {
+                $data['customer_phone_type'] = 'yes';
+            } else {
+                $data['customer_phone_type'] = 'no';
+            }
+
+            if (isset($data['customer_physical_type'])) {
+                $data['customer_physical_type'] = 'yes';
+                $response['customer_physical_type'] = 'yes';
+            } else {
+                $data['customer_physical_type'] = 'no';
+                $response['customer_physical_type'] = 'no';
+            }
+
+            if ($data['immediate'] == 'yes') {
+                $due_carbon = Carbon::now()->addMinute($immediatetime);
+                $data['due'] = $due_carbon->format('Y-m-d H:i:s');
+                $data['immediate'] = 'yes';
+                $data['customer_phone_type'] = 'yes';
+                $response['type'] = 'immediate';
+
+            } else {
+                $due = $data['due_date'] . " " . $data['due_time'];
+                $response['type'] = 'regular';
+                $due_carbon = Carbon::createFromFormat('m/d/Y H:i', $due);
+                $data['due'] = $due_carbon->format('Y-m-d H:i:s');
+                if ($due_carbon->isPast()) {
+                    $response['status'] = 'fail';
+                    $response['message'] = "Can't create booking in past";
+                    return response($response);
+                }
+            }
+            if (in_array('male', $data['job_for'])) {
+                $data['gender'] = 'male';
+            } else if (in_array('female', $data['job_for'])) {
+                $data['gender'] = 'female';
+            }
+            if (in_array('normal', $data['job_for'])) {
+                $data['certified'] = 'normal';
+            }
+            else if (in_array('certified', $data['job_for'])) {
+                $data['certified'] = 'yes';
+            } else if (in_array('certified_in_law', $data['job_for'])) {
+                $data['certified'] = 'law';
+            } else if (in_array('certified_in_helth', $data['job_for'])) {
+                $data['certified'] = 'health';
+            }
+            if (in_array('normal', $data['job_for']) && in_array('certified', $data['job_for'])) {
+                $data['certified'] = 'both';
+            }
+            else if(in_array('normal', $data['job_for']) && in_array('certified_in_law', $data['job_for']))
+            {
+                $data['certified'] = 'n_law';
+            }
+            else if(in_array('normal', $data['job_for']) && in_array('certified_in_helth', $data['job_for']))
+            {
+                $data['certified'] = 'n_health';
+            }
+            if ($consumer_type == 'rwsconsumer')
+                $data['job_type'] = 'rws';
+            else if ($consumer_type == 'ngo')
+                $data['job_type'] = 'unpaid';
+            else if ($consumer_type == 'paid')
+                $data['job_type'] = 'paid';
+            $data['b_created_at'] = date('Y-m-d H:i:s');
+            if (isset($due))
+                $data['will_expire_at'] = TeHelper::willExpireAt($due, $data['b_created_at']);
+            $data['by_admin'] = isset($data['by_admin']) ? $data['by_admin'] : 'no';
+
+            $job = $this->repository->createJob($data);
+
+            $response['status'] = 'success';
+            $response['id'] = $job->id;
+            $data['job_for'] = array();
+            if ($job->gender != null) {
+                if ($job->gender == 'male') {
+                    $data['job_for'][] = 'Man';
+                } else if ($job->gender == 'female') {
+                    $data['job_for'][] = 'Kvinna';
+                }
+            }
+            if ($job->certified != null) {
+                if ($job->certified == 'both') {
+                    $data['job_for'][] = 'normal';
+                    $data['job_for'][] = 'certified';
+                } else if ($job->certified == 'yes') {
+                    $data['job_for'][] = 'certified';
+                } else {
+                    $data['job_for'][] = $job->certified;
+                }
+            }
+
+            $data['customer_town'] = $cuser->userMeta->city;
+            $data['customer_type'] = $cuser->userMeta->customer_type;
+
+        } else {
+            $response['status'] = 'fail';
+            $response['message'] = "Translator can not create booking";
+        }
 
         return response($response);
 
@@ -95,7 +242,14 @@ class BookingController extends Controller
         $adminSenderEmail = config('app.adminemail');
         $data = $request->all();
 
-        $response = $this->repository->storeJobEmail($data);
+        $this->repository->storeJobEmail($data);
+        $mailerService->sendReceivedInterpreterBookingMail($job, $user);
+
+        $response['type'] = $user_type;
+        $response['job'] = $job;
+        $response['status'] = 'success';
+        $data = $jobService->jobToData($job);
+        Event::fire(new JobWasCreated($job, $data, '*'));
 
         return response($response);
     }
@@ -108,10 +262,11 @@ class BookingController extends Controller
     {
         if($user_id = $request->get('user_id')) {
 
-            $response = $this->repository->getUsersJobsHistory($user_id, $request);
+            $response = $this->repository->getUsersJobsHistory($user_id, $request->get('page'));
             return response($response);
         }
 
+        // shouldnt controller always return a valid response, in symfony it always does
         return null;
     }
 
@@ -286,6 +441,7 @@ class BookingController extends Controller
             $this->repository->sendSMSNotificationToTranslator($job);
             return response(['success' => 'SMS sent']);
         } catch (\Exception $e) {
+            // sending exception message in response?????
             return response(['success' => $e->getMessage()]);
         }
     }
